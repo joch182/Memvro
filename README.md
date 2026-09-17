@@ -1,12 +1,79 @@
 # Memvro
 
-Memvro is a local-first desktop meeting transcription app. It captures system audio and microphone input, transcribes it locally, and exports a `.txt` file. It does not use meeting-provider APIs.
+![Status: early development](https://img.shields.io/badge/status-early%20development-orange)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+
+> A local-first desktop meeting recorder and transcription tool for macOS and Windows.
+
+Memvro is a local-first desktop app for recording and transcribing online meetings. It is designed for meetings held in Teams, Slack, Zoom, web browsers, and other desktop applications without requiring a separate integration with each meeting provider.
+
+When you start a recording, Memvro captures two audio sources on the computer:
+
+- **Microphone audio:** your voice and any other sound received by the selected microphone.
+- **System audio:** the sound played by the computer, such as the voices of other meeting participants and shared media.
+
+When you stop recording, the app saves these audio tracks locally, prepares them for transcription, and combines them into a single audio stream. The bundled English Whisper model then processes that audio on your computer. The resulting transcript is written to a plain-text `recording.txt` file in the recording folder.
+
+The entire recording and transcription workflow runs locally. Memvro does not connect to Teams, Slack, Zoom, or another meeting-provider API, and it does not upload audio or transcript data to a cloud service. This makes the app suitable for workflows where keeping meeting data on the local device is important. You should still obtain any consent required by your organization or local laws before recording a meeting.
+
+Memvro is currently an early-stage project. The macOS development path is available, while the Windows implementation still needs runtime validation on Windows 10/11.
 
 The current version contains the desktop UI, native microphone and system-audio capture, local Whisper transcription, and text export.
 
 Recordings and transcripts use the storage location selected in **Settings**. Each session creates a local-time folder like `2026-09-16_21-58-04` containing `recording.wav`, `system_audio.wav` on supported platforms, and `recording.txt`. The location is saved in the app settings and reused on the next launch.
 
-## Run the UI preview
+## Contents
+
+- [Features](#features)
+- [Privacy and consent](#privacy-and-consent)
+- [Platform status](#platform-status)
+- [Getting started](#getting-started)
+- [Storage](#storage)
+- [Development](#development)
+- [Architecture](#architecture)
+- [Limitations](#limitations)
+- [Contributing](#contributing)
+- [Security and privacy reports](#security-and-privacy-reports)
+- [License](#license)
+
+## Features
+
+- Capture the default microphone and computer playback audio as separate WAV tracks.
+- Record meetings from Teams, Slack, Zoom, browsers, or other desktop applications without provider APIs.
+- Transcribe English audio locally with the bundled Whisper model.
+- Resample and mix the audio tracks before transcription.
+- Choose a persistent local storage directory from the app settings.
+- Export a plain-text transcript for each recording.
+
+## Privacy and consent
+
+Audio capture, transcription, and transcript generation happen on the local device. Memvro does not require an account, API key, meeting-provider integration, or cloud transcription service, and it does not intentionally upload recordings or transcripts.
+
+Local processing does not replace consent requirements. Before recording, follow applicable laws, workplace policies, and the rules of the meeting or organization.
+
+## Platform Status
+
+| Platform | Status | System audio |
+| --- | --- | --- |
+| macOS | Development path available; needs broader runtime and audio validation | ScreenCaptureKit |
+| Windows 10/11 | Implementation present; runtime validation pending | WASAPI loopback |
+
+The project currently targets developers and testers rather than end users. Packaged installers and release artifacts are not published yet.
+
+## Getting Started
+
+### Clone the repository
+
+The Whisper model is managed with [Git LFS](https://git-lfs.com/) because it is larger than GitHub's regular file-size limit. Install Git LFS before cloning:
+
+```bash
+git lfs install
+git clone https://github.com/joch182/Memvro.git
+cd Memvro
+git lfs pull
+```
+
+### Run the UI preview
 
 Requires Node.js and npm.
 
@@ -17,7 +84,7 @@ npm run dev
 
 Open the local URL printed by Vite. This preview lets you inspect the interface, but native recording commands only work inside the Tauri desktop app.
 
-## Run the desktop app
+### Run the desktop app
 
 The native Tauri app requires Rust, CMake, and the full Xcode installation on macOS. The full Xcode SDK is needed by ScreenCaptureKit; Command Line Tools alone are not sufficient. Install Rust if `cargo` is not available:
 
@@ -44,7 +111,7 @@ RUSTFLAGS='-C link-arg=-Wl,-rpath,/Applications/Xcode.app/Contents/Developer/Too
 
 The `RUSTFLAGS` value adds the Swift runtime path required by the current Xcode toolchain when running the local debug binary.
 
-## Troubleshooting desktop startup
+## Troubleshooting
 
 If Vite reports that port `1420` is already in use, stop the stale development server and retry:
 
@@ -55,7 +122,22 @@ if [[ -n "$PIDS" ]]; then kill $PIDS; fi
 
 If the executable reports `Library not loaded: @rpath/libswift_Concurrency.dylib`, confirm that full Xcode is selected and start the app with the `RUSTFLAGS` command above. A successful `cargo check` does not guarantee that the native executable can launch; this Swift runtime lookup happens at runtime.
 
-## Validate the frontend
+## Storage
+
+Choose the root storage folder from **Settings**. Memvro remembers the setting and creates one folder per recording:
+
+```text
+<storage folder>/<YYYY-MM-DD_HH-MM-SS>/
+	recording.wav
+	system_audio.wav
+	recording.txt
+```
+
+The English `ggml-base.en.bin` model is bundled with the Tauri application. During development, `MEMVRO_WHISPER_MODEL_PATH` can override its location.
+
+## Development
+
+### Validate the frontend
 
 ```bash
 npm run build
@@ -63,7 +145,25 @@ npm run build
 
 This runs the TypeScript check and creates the production frontend bundle in `dist/`.
 
-## Current limitations
+### Validate the Rust backend
+
+```bash
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+## Architecture
+
+- **Frontend:** React, TypeScript, and Vite
+- **Desktop shell:** Tauri 2
+- **Microphone capture:** CPAL
+- **macOS system audio:** ScreenCaptureKit
+- **Windows system audio:** WASAPI loopback
+- **Audio files:** WAV via Hound
+- **Local transcription:** Whisper through `whisper-rs`
+- **Settings:** Local JSON configuration and user-selected filesystem storage
+
+## Limitations
 
 - The native prototype captures the default microphone and system audio.
 - macOS system audio capture uses ScreenCaptureKit and requires Screen Recording permission. Windows system audio capture uses shared-mode WASAPI loopback on the default output device.
@@ -71,7 +171,25 @@ This runs the TypeScript check and creates the production frontend bundle in `di
 - Audio and transcripts are saved locally in timestamped session folders.
 - The English `ggml-base.en.bin` model is bundled with the Tauri app. During development, `MEMVRO_WHISPER_MODEL_PATH` can override its location.
 - Windows runtime validation still requires building and running the app on Windows 10/11.
-- Rust is required to run the native Tauri application.
+- No packaged desktop releases are available yet.
+
+## Contributing
+
+Issues and pull requests are welcome. Please include the operating system, audio devices, reproduction steps, and relevant logs when reporting capture or transcription problems.
+
+Before opening a pull request:
+
+1. Keep platform-specific Rust code behind the appropriate target configuration.
+2. Run `npm run build`, `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`, and `cargo check --manifest-path src-tauri/Cargo.toml`.
+3. Keep the local-first privacy model intact. Discuss telemetry, cloud services, or provider-specific integrations before implementing them.
+
+## Security and privacy reports
+
+Do not include meeting recordings, transcripts, API keys, or other sensitive information in public issues. For a suspected security or privacy vulnerability, contact the repository maintainer privately through GitHub before creating a public issue.
+
+## License
+
+Memvro is available under the [MIT License](LICENSE). Third-party dependencies and the bundled Whisper model may have additional license terms; review their notices before redistribution.
 
 ## Recommended IDE Setup
 
