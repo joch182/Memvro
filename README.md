@@ -12,7 +12,7 @@ When you start a recording, Memvro captures two audio sources on the computer:
 - **Microphone audio:** your voice and any other sound received by the selected microphone.
 - **System audio:** the sound played by the computer, such as the voices of other meeting participants and shared media.
 
-When you stop recording, the app saves these audio tracks locally, prepares them for transcription, and combines them into a single audio stream. The bundled English Whisper model then processes that audio on your computer. The resulting transcript is written to a plain-text `recording.txt` file in the recording folder.
+When you stop recording, the app saves these audio tracks locally, prepares them for transcription, and combines them into a single audio stream. The selected Whisper model automatically detects English or Spanish and processes the audio on your computer. The resulting transcript is written to a plain-text `recording.txt` file in the recording folder.
 
 The entire recording and transcription workflow runs locally. Memvro does not connect to Teams, Slack, Zoom, or another meeting-provider API, and it does not upload audio or transcript data to a cloud service. This makes the app suitable for workflows where keeping meeting data on the local device is important. You should still obtain any consent required by your organization or local laws before recording a meeting.
 
@@ -40,7 +40,7 @@ Recordings and transcripts use the storage location selected in **Settings**. Ea
 
 - Capture the default microphone and computer playback audio as separate WAV tracks.
 - Record meetings from Teams, Slack, Zoom, browsers, or other desktop applications without provider APIs.
-- Transcribe English audio locally with the bundled Whisper model.
+- Choose and download a Whisper model from Settings, including multilingual English/Spanish detection.
 - Resample and mix the audio tracks before transcription.
 - Choose a persistent local storage directory from the app settings.
 - Export a plain-text transcript for each recording.
@@ -64,13 +64,9 @@ The project currently targets developers and testers rather than end users. Pack
 
 ### Clone the repository
 
-The Whisper model is managed with [Git LFS](https://git-lfs.com/) because it is larger than GitHub's regular file-size limit. Install Git LFS before cloning:
-
 ```bash
-git lfs install
 git clone https://github.com/joch182/Memvro.git
 cd Memvro
-git lfs pull
 ```
 
 ### Run the UI preview
@@ -84,9 +80,15 @@ npm run dev
 
 Open the local URL printed by Vite. This preview lets you inspect the interface, but native recording commands only work inside the Tauri desktop app.
 
-### Run the desktop app
+### Test the desktop app on macOS
 
-The native Tauri app requires Rust, CMake, and the full Xcode installation on macOS. The full Xcode SDK is needed by ScreenCaptureKit; Command Line Tools alone are not sufficient. Install Rust if `cargo` is not available:
+Use this workflow to test microphone capture, system-audio capture, local transcription, and transcript export on a Mac.
+
+#### 1. Install the prerequisites
+
+The native Tauri app requires Node.js, npm, Rust, CMake, and the full Xcode installation. The full Xcode SDK is required by ScreenCaptureKit; Xcode Command Line Tools alone are not sufficient.
+
+Install Rust and CMake if needed:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -102,14 +104,57 @@ sudo xcodebuild -runFirstLaunch
 xcodebuild -version
 ```
 
-Then start the desktop development build:
+#### 2. Start Memvro
+
+From the project directory, run this command:
 
 ```bash
 npm install
 RUSTFLAGS='-C link-arg=-Wl,-rpath,/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.5/macosx' npm run tauri dev
 ```
 
-The `RUSTFLAGS` value adds the Swift runtime path required by the current Xcode toolchain when running the local debug binary.
+The `RUSTFLAGS` value adds the Swift runtime path required by the current Xcode toolchain. This is the recommended macOS development command because it avoids the `libswift_Concurrency.dylib` startup error.
+
+You can use the same command in two readable steps:
+
+```bash
+export RUSTFLAGS='-C link-arg=-Wl,-rpath,/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.5/macosx'
+npm run tauri dev
+```
+
+If your Xcode and Swift runtime are already configured in your shell, this shorter command may work:
+
+```bash
+npm run tauri dev
+```
+
+If it fails with `Library not loaded: @rpath/libswift_Concurrency.dylib`, use the recommended command with `RUSTFLAGS` above.
+
+#### 3. Allow macOS permissions
+
+When Memvro starts, allow the application that launched it to access the microphone and screen recording:
+
+1. Open **System Settings > Privacy & Security > Microphone** and enable the terminal or VS Code used to launch Memvro.
+2. Open **System Settings > Privacy & Security > Screen Recording** and enable the same application for system-audio capture.
+3. Fully quit and restart Memvro after changing permissions.
+
+#### 4. Download a transcription model
+
+Open **Settings**, choose a model, and select **Download model**. The model download requires an internet connection. Recording and transcription run locally after the download completes.
+
+#### 5. Test a recording
+
+1. Start a meeting or play audio through the Mac.
+2. Click the round record button in Memvro.
+3. Speak into the microphone and play system audio for a few seconds.
+4. Stop the recording.
+5. Select **Transcribe locally**.
+
+The session folder contains the microphone track, system-audio track, and resulting `recording.txt` transcript.
+
+### Download a transcription model
+
+Models are not bundled with the application. Open **Settings**, choose a model, and select **Download model**. The model is saved in Memvro's local application data directory and reused for future recordings. An internet connection is required only while downloading a model; recording and transcription remain local.
 
 ## Troubleshooting
 
@@ -133,7 +178,7 @@ Choose the root storage folder from **Settings**. Memvro remembers the setting a
 	recording.txt
 ```
 
-The English `ggml-base.en.bin` model is bundled with the Tauri application. During development, `MEMVRO_WHISPER_MODEL_PATH` can override its location.
+Downloaded models are stored in the app's local data directory. During development, `MEMVRO_WHISPER_MODEL_PATH` can override the selected model path.
 
 ## Development
 
@@ -169,7 +214,7 @@ cargo check --manifest-path src-tauri/Cargo.toml
 - macOS system audio capture uses ScreenCaptureKit and requires Screen Recording permission. Windows system audio capture uses shared-mode WASAPI loopback on the default output device.
 - Microphone and system tracks are resampled and mixed before local transcription.
 - Audio and transcripts are saved locally in timestamped session folders.
-- The English `ggml-base.en.bin` model is bundled with the Tauri app. During development, `MEMVRO_WHISPER_MODEL_PATH` can override its location.
+- The multilingual model detects English or Spanish automatically; a model must be downloaded before transcription.
 - Windows runtime validation still requires building and running the app on Windows 10/11.
 - No packaged desktop releases are available yet.
 
@@ -189,7 +234,7 @@ Do not include meeting recordings, transcripts, API keys, or other sensitive inf
 
 ## License
 
-Memvro is available under the [MIT License](LICENSE). Third-party dependencies and the bundled Whisper model may have additional license terms; review their notices before redistribution.
+Memvro is available under the [MIT License](LICENSE). Third-party dependencies and downloaded Whisper models may have additional license terms; review their notices before redistribution.
 
 ## Recommended IDE Setup
 

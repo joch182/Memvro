@@ -14,9 +14,9 @@
       {
         "title": "Memvro",
         "width": 1120,
-        "height": 760,
-        "minWidth": 900,
-        "minHeight": 620
+        "height": 900,
+        "resizable": false,
+        "maximizable": false
       }
     ],
     "security": {
@@ -26,9 +26,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": [
-      "models/ggml-base.en.bin"
-    ],
     "macOS": {
       "minimumSystemVersion": "10.15"
     },

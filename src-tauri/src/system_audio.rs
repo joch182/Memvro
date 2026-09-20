@@ -11,7 +11,11 @@ use std::path::PathBuf;
 #[cfg(target_os = "windows")]
 use std::path::PathBuf;
 #[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "macos")]
 use std::sync::{Arc, Mutex};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use crate::audio::SharedLevel;
 
 #[cfg(target_os = "macos")]
 type SharedWriter = Arc<Mutex<Option<WavWriter<BufWriter<File>>>>>;
@@ -25,7 +29,7 @@ pub struct SystemAudioCapture {
 
 #[cfg(target_os = "macos")]
 impl SystemAudioCapture {
-    pub fn start(path: PathBuf) -> Result<Self, String> {
+    pub fn start(path: PathBuf, level: SharedLevel) -> Result<Self, String> {
         let content = SCShareableContent::get()
             .map_err(|error| format!("Unable to access macOS shareable content: {error}"))?;
         let display =
@@ -38,14 +42,14 @@ impl SystemAudioCapture {
             .build();
         let config = SCStreamConfiguration::new()
             .with_captures_audio(true)
-            .with_sample_rate(16_000)
-            .with_channel_count(1);
+            .with_sample_rate(48_000)
+            .with_channel_count(2);
         let writer = Arc::new(Mutex::new(Some(
             WavWriter::create(
                 &path,
                 WavSpec {
                     channels: 1,
-                    sample_rate: 16_000,
+                    sample_rate: 48_000,
                     bits_per_sample: 16,
                     sample_format: hound::SampleFormat::Int,
                 },
@@ -53,6 +57,9 @@ impl SystemAudioCapture {
             .map_err(|error| format!("Unable to create system audio file: {error}"))?,
         )));
         let callback_writer = Arc::clone(&writer);
+        let callback_level = Arc::clone(&level);
+        let format_logged = Arc::new(AtomicBool::new(false));
+        let callback_format_logged = Arc::clone(&format_logged);
         let mut stream = SCStream::new(&filter, &config);
         stream.add_output_handler(
             move |sample: CMSampleBuffer, output_type: SCStreamOutputType| {
@@ -62,6 +69,42 @@ impl SystemAudioCapture {
                 let Some(buffers) = sample.audio_buffer_list() else {
                     return;
                 };
+                let format = sample.format_description();
+                let bits_per_sample = format
+                    .as_ref()
+                    .and_then(|description| description.audio_bits_per_channel())
+                    .unwrap_or(32);
+                let is_float = format
+                    .as_ref()
+                    .is_some_and(|description| description.audio_is_float());
+                let bytes_per_sample = (bits_per_sample / 8) as usize;
+                if bytes_per_sample == 0 {
+                    return;
+                }
+                if !callback_format_logged.swap(true, Ordering::AcqRel) {
+                    let details = format.as_ref().map(|description| {
+                        format!(
+                            "rate={:?}, channels={:?}, bits={bits_per_sample}, bytes/frame={:?}, flags={:?}, float={is_float}",
+                            description.audio_sample_rate(),
+                            description.audio_channel_count(),
+                            description.audio_bytes_per_frame(),
+                            description.audio_format_flags()
+                        )
+                    });
+                    let first_bytes = buffers
+                        .iter()
+                        .next()
+                        .map(|buffer| {
+                            buffer
+                                .data()
+                                .iter()
+                                .take(16)
+                                .map(|byte| format!("{byte:02x}"))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        });
+                    eprintln!("ScreenCaptureKit audio format: {details:?}; first bytes: {first_bytes:?}");
+                }
                 let Ok(mut writer) = callback_writer.lock() else {
                     return;
                 };
@@ -69,8 +112,15 @@ impl SystemAudioCapture {
                     return;
                 };
                 for buffer in buffers.iter() {
-                    for bytes in buffer.data().chunks_exact(4) {
-                        let value = f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                    let channels = buffer.number_channels().max(1) as usize;
+                    let frame_size = bytes_per_sample * channels;
+                    for frame in buffer.data().chunks_exact(frame_size) {
+                        let value = frame
+                            .chunks_exact(bytes_per_sample)
+                            .map(|bytes| decode_pcm_sample(bytes, bits_per_sample, is_float))
+                            .sum::<f32>()
+                            / channels as f32;
+                        crate::audio::update_level(&callback_level, value);
                         let sample = (value.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
                         let _ = writer.write_sample(sample);
                     }
@@ -92,17 +142,30 @@ impl SystemAudioCapture {
         self.stream
             .stop_capture()
             .map_err(|error| format!("Unable to stop macOS system audio capture: {error}"))?;
-        let writer = Arc::try_unwrap(self.writer)
-            .map_err(|_| {
-                "Unable to finish system audio while audio is still being written".to_string()
-            })?
-            .into_inner()
+        let writer = self
+            .writer
+            .lock()
             .map_err(|_| "Unable to lock system audio file".to_string())?
+            .take()
             .ok_or_else(|| "System audio file was already closed".to_string())?;
         writer
             .finalize()
             .map_err(|error| format!("Unable to finalize system audio file: {error}"))?;
         Ok(self.path)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn decode_pcm_sample(bytes: &[u8], bits_per_sample: u32, is_float: bool) -> f32 {
+    match (bits_per_sample, is_float) {
+        (32, true) if bytes.len() >= 4 => f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        (32, false) if bytes.len() >= 4 => {
+            i32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as f32 / i32::MAX as f32
+        }
+        (16, false) if bytes.len() >= 2 => {
+            i16::from_ne_bytes([bytes[0], bytes[1]]) as f32 / i16::MAX as f32
+        }
+        _ => 0.0,
     }
 }
 
@@ -113,7 +176,7 @@ pub struct SystemAudioCapture;
 #[cfg(not(target_os = "macos"))]
 #[cfg(not(target_os = "windows"))]
 impl SystemAudioCapture {
-    pub fn start(_path: std::path::PathBuf) -> Result<Self, String> {
+    pub fn start(_path: std::path::PathBuf, _level: crate::audio::SharedLevel) -> Result<Self, String> {
         Err("System audio capture is not implemented for this platform yet".to_string())
     }
 
@@ -144,13 +207,13 @@ pub struct SystemAudioCapture {
 
 #[cfg(target_os = "windows")]
 impl SystemAudioCapture {
-    pub fn start(path: PathBuf) -> Result<Self, String> {
+    pub fn start(path: PathBuf, level: SharedLevel) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let worker_path = path.clone();
         let (ready_tx, ready_rx) = mpsc::channel();
         let worker = thread::spawn(move || {
-            let result = capture_windows_loopback(worker_path, worker_stop, ready_tx);
+            let result = capture_windows_loopback(worker_path, worker_stop, ready_tx, level);
             result
         });
         ready_rx
@@ -181,6 +244,7 @@ fn capture_windows_loopback(
     path: PathBuf,
     stop: Arc<AtomicBool>,
     ready_tx: mpsc::Sender<Result<(), String>>,
+    level: SharedLevel,
 ) -> Result<PathBuf, String> {
     let com_result = initialize_mta();
     if com_result.is_err() {
@@ -239,6 +303,7 @@ fn capture_windows_loopback(
                 sample_queue.pop_front().unwrap(),
                 sample_queue.pop_front().unwrap(),
             ]);
+            crate::audio::update_level(&level, value);
             let _ = writer.write_sample((value.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
         }
         let _ = event.wait_for_event(100);

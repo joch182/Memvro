@@ -1,10 +1,25 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./App.css";
 
+type ModelOption = {
+  id: string;
+  name: string;
+  description: string;
+  filename: string;
+  size: string;
+};
+
+type ModelStatus = {
+  selectedId: string;
+  options: ModelOption[];
+  downloaded: boolean;
+};
+
 function App() {
   const [isRecording, setIsRecording] = useState(false);
+  const [audioLevel, setAudioLevel] = useState(0);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [errorMessage, setErrorMessage] = useState("");
   const [recordingPath, setRecordingPath] = useState("");
@@ -14,6 +29,12 @@ function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [systemAudioReady, setSystemAudioReady] = useState(false);
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+  const [selectedModelId, setSelectedModelId] = useState("");
+  const [modelDownloaded, setModelDownloaded] = useState(false);
+  const [isDownloadingModel, setIsDownloadingModel] = useState(false);
+  const selectedModel = modelOptions.find((model) => model.id === selectedModelId);
+  const modelReady = Boolean(selectedModel && modelDownloaded);
 
   useEffect(() => {
     if (!isRecording) return;
@@ -26,6 +47,21 @@ function App() {
   }, [isRecording]);
 
   useEffect(() => {
+    if (!isRecording) {
+      setAudioLevel(0);
+      return;
+    }
+
+    const meter = window.setInterval(() => {
+      invoke<number>("audio_level")
+        .then((level) => setAudioLevel(Math.min(1, Math.max(0, level * 2.2))))
+        .catch(() => setAudioLevel(0));
+    }, 100);
+
+    return () => window.clearInterval(meter);
+  }, [isRecording]);
+
+  useEffect(() => {
     invoke<{ storagePath: string }>("get_storage_settings")
       .then((settings) => setStoragePath(settings.storagePath))
       .catch((error) => setErrorMessage(String(error)));
@@ -34,6 +70,16 @@ function App() {
   useEffect(() => {
     invoke<{ systemAudio: boolean }>("capture_status")
       .then((status) => setSystemAudioReady(status.systemAudio))
+      .catch((error) => setErrorMessage(String(error)));
+  }, []);
+
+  useEffect(() => {
+    invoke<ModelStatus>("get_model_status")
+      .then((status) => {
+        setModelOptions(status.options);
+        setSelectedModelId(status.selectedId);
+        setModelDownloaded(status.downloaded);
+      })
       .catch((error) => setErrorMessage(String(error)));
   }, []);
 
@@ -98,6 +144,31 @@ function App() {
     }
   }
 
+  async function selectModel(modelId: string) {
+    setErrorMessage("");
+    try {
+      const status = await invoke<ModelStatus>("set_model", { modelId });
+      setSelectedModelId(status.selectedId);
+      setModelDownloaded(status.downloaded);
+    } catch (error) {
+      setErrorMessage(String(error));
+    }
+  }
+
+  async function downloadSelectedModel() {
+    setErrorMessage("");
+    setIsDownloadingModel(true);
+    try {
+      const status = await invoke<ModelStatus>("download_model", { modelId: selectedModelId });
+      setSelectedModelId(status.selectedId);
+      setModelDownloaded(status.downloaded);
+    } catch (error) {
+      setErrorMessage(String(error));
+    } finally {
+      setIsDownloadingModel(false);
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -131,17 +202,24 @@ function App() {
               <h1>Ready when you are.</h1>
               <p className="subtitle">Record your meeting audio, then turn it into a transcript on this device.</p>
             </div>
-            <div className="model-chip"><span className="chip-dot" /> English model <strong>Base</strong></div>
+            <div className={`model-chip ${modelReady ? "model-chip-ready" : "model-chip-required"}`} title={selectedModel?.description || "Choose and download a transcription model in Settings."}>
+              <span className={`chip-dot ${modelReady ? "" : "chip-dot-required"}`} />
+              <span className="model-chip-copy">
+                <strong>{modelReady ? selectedModel?.name : "Model required"}</strong>
+                <small>{modelReady ? selectedModel?.description : "Choose and download in Settings"}</small>
+              </span>
+            </div>
           </div>
 
           <div className={`recording-panel ${isRecording ? "is-recording" : ""}`}>
             <div className="panel-topline"><span>{isRecording ? "Recording in progress" : "New recording"}</span><span>{formattedTime}</span></div>
             <div className="orbital-control">
+              <div className="meter-halo" style={{ "--audio-level": audioLevel } as CSSProperties} aria-hidden="true" />
               <div className="waveform" aria-hidden="true"><i /><i /><i /><i /><i /><i /><i /><i /><i /></div>
               <button className="record-button" type="button" onClick={toggleRecording} aria-label={isRecording ? "Stop recording" : "Start recording"}>
                 <span className={isRecording ? "stop-icon" : "mic-icon"}>{isRecording ? "" : "●"}</span>
               </button>
-              <p>{isRecording ? "Click to stop" : "Click to start"}</p>
+              <p>{isRecording ? `Listening · ${Math.round(audioLevel * 100)}% level` : "Click to start"}</p>
             </div>
             <div className="capture-sources">
               <span><span className="source-icon">◉</span> System audio</span>
@@ -163,7 +241,20 @@ function App() {
             <div className="settings-panel">
               <div>
                 <p className="eyebrow">Settings</p>
-                <h2>Storage location</h2>
+                <h2>Models and storage</h2>
+              </div>
+              <div className="model-picker">
+                <label htmlFor="model-select">Transcription model</label>
+                <select id="model-select" value={selectedModelId} onChange={(event) => selectModel(event.target.value)} disabled={isDownloadingModel}>
+                  {modelOptions.map((model) => <option key={model.id} value={model.id}>{model.name} ({model.size})</option>)}
+                </select>
+                <p className="settings-description">{modelOptions.find((model) => model.id === selectedModelId)?.description}</p>
+                <button className="model-download-button" type="button" onClick={downloadSelectedModel} disabled={isDownloadingModel || !selectedModelId || modelDownloaded}>
+                  {isDownloadingModel ? "Downloading model..." : modelDownloaded ? "Model downloaded" : "Download model"}
+                </button>
+              </div>
+              <div className="storage-settings">
+                <h3>Storage location</h3>
                 <p className="settings-description">Each recording creates a timestamped folder here containing its audio and transcript.</p>
               </div>
               <div className="storage-picker">
@@ -179,7 +270,7 @@ function App() {
 
           <div className="info-grid">
             <article className="info-block"><span className="info-number">01</span><div><h2>Capture</h2><p>Audio stays on your computer while you meet in Teams, Slack, Zoom, or any other app.</p></div></article>
-            <article className="info-block"><span className="info-number">02</span><div><h2>Transcribe</h2><p>When you stop, Memvro processes the recording locally with its built-in English model.</p></div></article>
+            <article className="info-block"><span className="info-number">02</span><div><h2>Transcribe</h2><p>When you stop, Memvro detects English or Spanish and processes the recording locally.</p></div></article>
             <article className="info-block"><span className="info-number">03</span><div><h2>Export</h2><p>Save a clean, UTF-8 text file to the folder you choose. Temporary audio is removed.</p></div></article>
           </div>
         </section>

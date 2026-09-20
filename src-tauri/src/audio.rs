@@ -7,13 +7,37 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 type SharedWriter = Arc<Mutex<Option<WavWriter<BufWriter<File>>>>>;
 
+pub type SharedLevel = Arc<AtomicU32>;
+
+pub fn read_level(level: &SharedLevel) -> f32 {
+    f32::from_bits(level.swap(0.0_f32.to_bits(), Ordering::AcqRel))
+}
+
+pub fn update_level(level: &SharedLevel, sample: f32) {
+    let value = sample.abs().clamp(0.0, 1.0);
+    let mut current = level.load(Ordering::Relaxed);
+    while value > f32::from_bits(current) {
+        match level.compare_exchange_weak(
+            current,
+            value.to_bits(),
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(next) => current = next,
+        }
+    }
+}
+
 pub struct RecordingController {
     commands: Sender<Command>,
+    level: SharedLevel,
 }
 
 enum Command {
@@ -24,8 +48,10 @@ enum Command {
 impl RecordingController {
     pub fn new() -> Self {
         let (commands, receiver) = mpsc::channel();
-        thread::spawn(move || recording_worker(receiver));
-        Self { commands }
+        let level = Arc::new(AtomicU32::new(0.0_f32.to_bits()));
+        let worker_level = Arc::clone(&level);
+        thread::spawn(move || recording_worker(receiver, worker_level));
+        Self { commands, level }
     }
 
     pub fn start(&self, path: PathBuf) -> Result<(), String> {
@@ -47,9 +73,13 @@ impl RecordingController {
             .recv()
             .map_err(|_| "Audio worker stopped unexpectedly".to_string())?
     }
+
+    pub fn level(&self) -> f32 {
+        read_level(&self.level)
+    }
 }
 
-fn recording_worker(receiver: Receiver<Command>) {
+fn recording_worker(receiver: Receiver<Command>, level: SharedLevel) {
     let mut recording: Option<Recording> = None;
     while let Ok(command) = receiver.recv() {
         match command {
@@ -57,7 +87,7 @@ fn recording_worker(receiver: Receiver<Command>) {
                 let result = if recording.is_some() {
                     Err("A recording is already in progress".to_string())
                 } else {
-                    match Recording::start(path) {
+                    match Recording::start(path, Arc::clone(&level)) {
                         Ok(new_recording) => {
                             recording = Some(new_recording);
                             Ok(())
@@ -86,9 +116,9 @@ struct Recording {
 }
 
 impl Recording {
-    fn start(path: PathBuf) -> Result<Self, String> {
+    fn start(path: PathBuf, level: SharedLevel) -> Result<Self, String> {
         let system_audio_path = path.with_file_name("system_audio.wav");
-        let system_audio = SystemAudioCapture::start(system_audio_path)?;
+        let system_audio = SystemAudioCapture::start(system_audio_path, Arc::clone(&level))?;
         let host = cpal::default_host();
         let device = host
             .default_input_device()
@@ -110,19 +140,20 @@ impl Recording {
                 .map_err(|error| format!("Unable to create recording file: {error}"))?,
         )));
         let callback_writer = Arc::clone(&writer);
+        let callback_level = Arc::clone(&level);
         let error_callback = |error| eprintln!("microphone stream error: {error}");
         let stream = match sample_format {
             SampleFormat::I8 => {
-                build_stream::<i8>(&device, &config, channels, callback_writer, error_callback)
+                build_stream::<i8>(&device, &config, channels, callback_writer, callback_level, error_callback)
             }
             SampleFormat::I16 => {
-                build_stream::<i16>(&device, &config, channels, callback_writer, error_callback)
+                build_stream::<i16>(&device, &config, channels, callback_writer, callback_level, error_callback)
             }
             SampleFormat::I32 => {
-                build_stream::<i32>(&device, &config, channels, callback_writer, error_callback)
+                build_stream::<i32>(&device, &config, channels, callback_writer, callback_level, error_callback)
             }
             SampleFormat::F32 => {
-                build_stream::<f32>(&device, &config, channels, callback_writer, error_callback)
+                build_stream::<f32>(&device, &config, channels, callback_writer, callback_level, error_callback)
             }
             format => Err(format!("Unsupported microphone sample format: {format:?}")),
         };
@@ -147,13 +178,12 @@ impl Recording {
     fn stop(self) -> Result<PathBuf, String> {
         drop(self.stream);
         self.system_audio.stop()?;
-        let writer = Arc::try_unwrap(self.writer)
-            .map_err(|_| {
-                "Unable to finish recording while audio is still being written".to_string()
-            })?
-            .into_inner()
-            .map_err(|_| "Unable to lock recording file".to_string())?;
-        let writer = writer.ok_or_else(|| "Recording file was already closed".to_string())?;
+        let writer = self
+            .writer
+            .lock()
+            .map_err(|_| "Unable to lock recording file".to_string())?
+            .take()
+            .ok_or_else(|| "Recording file was already closed".to_string())?;
         writer
             .finalize()
             .map_err(|error| format!("Unable to finalize recording file: {error}"))?;
@@ -166,6 +196,7 @@ fn build_stream<T>(
     config: &StreamConfig,
     channels: usize,
     writer: SharedWriter,
+    level: SharedLevel,
     error_callback: impl Fn(cpal::StreamError) + Send + 'static,
 ) -> Result<Stream, String>
 where
@@ -188,6 +219,7 @@ where
                         .map(|sample| sample.to_sample::<f32>())
                         .sum::<f32>()
                         / frame.len() as f32;
+                    update_level(&level, average);
                     let sample = (average.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
                     let _ = writer.write_sample(sample);
                 }
